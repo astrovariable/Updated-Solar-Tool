@@ -183,27 +183,20 @@ header { text-align: center; padding: 40px 0 32px; }
 /* ── canvas container ────────────────────────────── */
 .canvas-wrap {
   position: relative;
-  background: rgba(245,240,232,.96);
-  border-radius: 12px;
+  background: transparent;
+  border-radius: 50%;
   overflow: hidden;
   box-shadow: 0 0 0 1px rgba(255,255,255,.1), 0 24px 80px rgba(0,0,0,.6);
-  margin-bottom: 22px;
+  margin: 0 auto 22px;
+  width: min(90vw, 640px);
+  height: min(90vw, 640px);
+  border-radius: 50%;
 }
 .canvas-wrap canvas {
   display: block;
   width: 100%;
-  height: auto;
-  border-radius: 12px;
-}
-.canvas-label {
-  position: absolute;
-  top: 12px; left: 16px;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  letter-spacing: .14em;
-  color: #888;
-  text-transform: uppercase;
-  pointer-events: none;
+  height: 100%;
+  border-radius: 50%;
 }
 
 /* ── info strip ──────────────────────────────────── */
@@ -235,19 +228,6 @@ header { text-align: center; padding: 40px 0 32px; }
 }
 .info-card .value.warn { color: #e07840; }
 .info-card .value.dim  { color: var(--muted); }
-
-/* ── observation window ──────────────────────────── */
-.obs-box {
-  background: rgba(42,92,170,.12);
-  border: 1px solid rgba(91,141,224,.25);
-  border-radius: 10px;
-  padding: 14px 18px;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 13px;
-  color: var(--bluelight);
-  margin-bottom: 22px;
-}
-.obs-box span { color: var(--paper); }
 
 /* ── legend ──────────────────────────────────────── */
 .legend {
@@ -332,9 +312,6 @@ footer {
   <div class="info-card"><div class="label">Solar Noon (IST)</div><div class="value" id="iNoon">—</div></div>
 </div>
 
-<!-- Observation window -->
-<div class="obs-box" id="obsBox">Computing observation window…</div>
-
 <!-- Tabs -->
 <div class="tab-row">
   <button class="tab-btn active" id="tabDaily" onclick="setTab('daily')">Daily Shadow Path</button>
@@ -353,11 +330,10 @@ footer {
 
 <!-- Canvas -->
 <div class="canvas-wrap">
-  <div class="canvas-label" id="canvasLabel">A4 landscape — 29.7 × 21 cm</div>
   <canvas id="board"></canvas>
 </div>
 
-<footer>IST = UTC +5:30 &nbsp;·&nbsp; Meridian 82.5°E &nbsp;·&nbsp; VSOP-style EoT &amp; Spencer declination &nbsp;·&nbsp; All math verified</footer>
+<footer>IST = UTC +5:30 &nbsp;·&nbsp; Meridian 82.5°E &nbsp;·&nbsp; Spencer declination · Woolf EoT &nbsp;·&nbsp; All math verified</footer>
 
 </div>
 
@@ -480,122 +456,128 @@ function setTab(t) {
 }
 
 /* ══════════════════════════════════════════════════════
-   BOARD GEOMETRY (A4 landscape, cm units internally)
+   BOARD GEOMETRY (circular, centred gnomon)
 ══════════════════════════════════════════════════════ */
-const BOARD_W  = 29.7; // cm
-const BOARD_H  = 21.0; // cm
-// Gnomon near right-centre — gives long shadow trails toward left
-const GNOMON_X = 22.0; // cm from left
-const GNOMON_Y = 10.5; // cm from top
+// Radius in cm — determines shadow reach before clipping
+const PLOT_R_CM = 60; // cm radius of the circle
 
 function buildBoardGeometry(canvas) {
-  const dpr = window.devicePixelRatio || 1;
-  const css_w = canvas.clientWidth;
-  const css_h = Math.round(css_w * (BOARD_H / BOARD_W));
+  const dpr   = window.devicePixelRatio || 1;
+  const css_w = canvas.clientWidth || canvas.offsetWidth || 600;
+  const css_h = css_w; // square canvas for circle
 
   canvas.width  = css_w * dpr;
   canvas.height = css_h * dpr;
   canvas.style.height = css_h + 'px';
 
-  const scale = (css_w * dpr) / BOARD_W; // px per cm (physical)
-  const gx = GNOMON_X * scale;
-  const gy = GNOMON_Y * scale;
+  const R_px = (css_w * dpr) / 2; // radius in physical px
+  const scale = R_px / PLOT_R_CM; // px per cm
+  const cx = R_px; // centre x (gnomon)
+  const cy = R_px; // centre y (gnomon)
 
-  return { scale, gx, gy, dpr, css_w };
+  return { scale, gx: cx, gy: cy, R_px, dpr, css_w };
 }
 
-// Convert shadow endpoint in cm (relative to gnomon) → canvas px
+function inCircle(geo, px, py) {
+  const dx = px - geo.gx, dy = py - geo.gy;
+  return (dx*dx + dy*dy) <= (geo.R_px * geo.R_px);
+}
+
+// Convert shadow offset in cm → canvas px (gnomon is at centre)
 function shadowPx(geo, x_cm, y_cm) {
   return {
     px: geo.gx + x_cm * geo.scale,
-    py: geo.gy - y_cm * geo.scale  // canvas Y is flipped vs geographic N
+    py: geo.gy - y_cm * geo.scale  // canvas Y flipped vs geographic N
   };
-}
-
-function inBoard(geo, px, py) {
-  const W = BOARD_W * geo.scale;
-  const H = BOARD_H * geo.scale;
-  return px >= 0 && px <= W && py >= 0 && py <= H;
 }
 
 /* ══════════════════════════════════════════════════════
    DRAWING
 ══════════════════════════════════════════════════════ */
 function drawBoardBackground(ctx, geo) {
-  const W = BOARD_W * geo.scale;
-  const H = BOARD_H * geo.scale;
-  const s = geo.scale;
+  const { gx, gy, R_px, scale } = geo;
 
-  // Paper
+  // Circular clip
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(gx, gy, R_px, 0, 2 * Math.PI);
+  ctx.clip();
+
+  // Paper fill
   ctx.fillStyle = '#f5f0e8';
-  ctx.fillRect(0, 0, W, H);
+  ctx.fillRect(0, 0, gx * 2, gy * 2);
 
-  // Grid lines (every 2 cm)
+  // Polar grid rings (every 10 cm)
   ctx.strokeStyle = 'rgba(42,92,170,0.10)';
-  ctx.lineWidth = 0.6;
-  for (let x = 0; x <= BOARD_W; x += 2) {
-    ctx.beginPath(); ctx.moveTo(x*s, 0); ctx.lineTo(x*s, H); ctx.stroke();
+  ctx.lineWidth = 0.8;
+  for (let r_cm = 10; r_cm < PLOT_R_CM; r_cm += 10) {
+    ctx.beginPath();
+    ctx.arc(gx, gy, r_cm * scale, 0, 2 * Math.PI);
+    ctx.stroke();
   }
-  for (let y = 0; y <= BOARD_H; y += 2) {
-    ctx.beginPath(); ctx.moveTo(0, y*s); ctx.lineTo(W, y*s); ctx.stroke();
+
+  // Cardinal spoke lines
+  ctx.strokeStyle = 'rgba(42,92,170,0.10)';
+  ctx.lineWidth = 0.8;
+  for (let a = 0; a < 360; a += 45) {
+    const rad = (a - 90) * Math.PI / 180;
+    ctx.beginPath();
+    ctx.moveTo(gx, gy);
+    ctx.lineTo(gx + Math.cos(rad) * R_px, gy + Math.sin(rad) * R_px);
+    ctx.stroke();
   }
 
-  // Compass rose (tiny, bottom-right)
-  drawCompass(ctx, W - 28, H - 28, 18);
+  ctx.restore();
 
-  // Scale bar (bottom-left)
-  ctx.strokeStyle = '#555';
-  ctx.lineWidth = 1;
-  const sb = 5 * s; // 5 cm
-  ctx.beginPath(); ctx.moveTo(12, H - 14); ctx.lineTo(12 + sb, H - 14); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(12, H - 18); ctx.lineTo(12, H - 10); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(12 + sb, H - 18); ctx.lineTo(12 + sb, H - 10); ctx.stroke();
-  ctx.fillStyle = '#444';
-  ctx.font = `${Math.max(9, s * 0.9)}px JetBrains Mono, monospace`;
-  ctx.textAlign = 'center';
-  ctx.fillText('5 cm', 12 + sb / 2, H - 4);
-
-  // Gnomon
-  ctx.fillStyle = '#c0392b';
+  // Outer circle border
+  ctx.save();
+  ctx.strokeStyle = 'rgba(26,42,74,0.5)';
+  ctx.lineWidth = 1.5;
   ctx.beginPath();
-  ctx.arc(geo.gx, geo.gy, Math.max(3, s * 0.22), 0, 2 * Math.PI);
-  ctx.fill();
-
-  // Gnomon label
-  ctx.fillStyle = '#888';
-  ctx.font = `${Math.max(8, s * 0.75)}px JetBrains Mono, monospace`;
-  ctx.textAlign = 'left';
-  ctx.fillText('G', geo.gx + 6, geo.gy - 5);
-}
-
-function drawCompass(ctx, cx, cy, r) {
-  const dirs = [['N', 0], ['E', 90], ['S', 180], ['W', 270]];
-  ctx.fillStyle = '#888';
-  ctx.font = `${Math.max(7, r * 0.5)}px Inter, sans-serif`;
-  ctx.textAlign = 'center';
-  dirs.forEach(([label, angle]) => {
-    const rad = (angle - 90) * Math.PI / 180;
-    ctx.fillText(label, cx + Math.cos(rad) * r, cy + Math.sin(rad) * r + 3);
-  });
-  // Arrow for N
-  ctx.strokeStyle = '#c0392b';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(cx, cy + r * 0.5);
-  ctx.lineTo(cx, cy - r * 0.5);
+  ctx.arc(gx, gy, R_px - 0.75, 0, 2 * Math.PI);
   ctx.stroke();
+  ctx.restore();
+
+  // Cardinal compass labels just inside the rim
+  const dirs = [['N', -90], ['E', 0], ['S', 90], ['W', 180]];
+  const labelR = R_px - 14;
+  ctx.save();
+  ctx.font = `${Math.max(9, scale * 1.1)}px Inter, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  dirs.forEach(([label, deg]) => {
+    const rad = deg * Math.PI / 180;
+    const lx = gx + Math.cos(rad) * labelR;
+    const ly = gy + Math.sin(rad) * labelR;
+    ctx.fillStyle = label === 'N' ? '#c0392b' : '#888';
+    ctx.fillText(label, lx, ly);
+  });
+  ctx.restore();
+
+  // Gnomon dot at centre
+  ctx.save();
   ctx.fillStyle = '#c0392b';
   ctx.beginPath();
-  ctx.moveTo(cx, cy - r * 0.5);
-  ctx.lineTo(cx - 3, cy - r * 0.1);
-  ctx.lineTo(cx + 3, cy - r * 0.1);
-  ctx.closePath();
+  ctx.arc(gx, gy, Math.max(4, scale * 0.22), 0, 2 * Math.PI);
   ctx.fill();
+  // Small "G" label
+  ctx.fillStyle = '#888';
+  ctx.font = `${Math.max(8, scale * 0.75)}px JetBrains Mono, monospace`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText('G', gx + 7, gy - 5);
+  ctx.restore();
 }
+
 
 function plotDailyShadow(ctx, geo, lat, lon, N, height, showHourMarks) {
   const s = geo.scale;
+
+  // Clip all drawing to circle
   ctx.save();
+  ctx.beginPath();
+  ctx.arc(geo.gx, geo.gy, geo.R_px - 1, 0, 2 * Math.PI);
+  ctx.clip();
 
   // Shadow curve
   ctx.strokeStyle = '#1a5cb8';
@@ -604,7 +586,6 @@ function plotDailyShadow(ctx, geo, lat, lon, N, height, showHourMarks) {
   ctx.beginPath();
 
   let penDown = false;
-  let firstValid = true;
 
   for (let t = 5 * 60; t <= 19 * 60; t += 3) {
     const IST = t / 60;
@@ -617,9 +598,8 @@ function plotDailyShadow(ctx, geo, lat, lon, N, height, showHourMarks) {
     const y_cm = L * Math.cos(saz);
     const { px, py } = shadowPx(geo, x_cm, y_cm);
 
-    if (!inBoard(geo, px, py)) { penDown = false; continue; }
+    if (!inCircle(geo, px, py)) { penDown = false; continue; }
 
-    // FIX: moveTo for first point of each run, not lineTo
     if (!penDown) {
       ctx.moveTo(px, py);
       penDown = true;
@@ -637,26 +617,24 @@ function plotDailyShadow(ctx, geo, lat, lon, N, height, showHourMarks) {
       const L   = height / Math.tan(pos.alt);
       const saz = pos.az + Math.PI;
       const { px, py } = shadowPx(geo, L * Math.sin(saz), L * Math.cos(saz));
-      if (!inBoard(geo, px, py)) continue;
+      if (!inCircle(geo, px, py)) continue;
 
-      // Tick dot
       ctx.fillStyle = '#2a5caa';
       ctx.beginPath();
       ctx.arc(px, py, 2.5, 0, 2 * Math.PI);
       ctx.fill();
 
-      // Hour label
       const isNoon = h === 12;
       ctx.fillStyle   = isNoon ? '#c0392b' : '#2a5caa';
       ctx.font = `${Math.max(8, s * 0.75)}px JetBrains Mono, monospace`;
       ctx.textAlign   = 'center';
+      ctx.textBaseline = 'middle';
 
-      // Nudge label slightly outward from gnomon
       const dx = px - geo.gx, dy = py - geo.gy;
       const len = Math.sqrt(dx*dx + dy*dy) || 1;
-      const nx = px + (dx / len) * 10;
-      const ny = py + (dy / len) * 10;
-      ctx.fillText(`${h}`, nx, ny + 3);
+      const nx = px + (dx / len) * 11;
+      const ny = py + (dy / len) * 11;
+      ctx.fillText(`${h}`, nx, ny);
     }
   }
 
@@ -664,7 +642,11 @@ function plotDailyShadow(ctx, geo, lat, lon, N, height, showHourMarks) {
 }
 
 function plotAnalemma(ctx, geo, lat, lon, height, IST) {
-  // Each day of year at the given IST
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(geo.gx, geo.gy, geo.R_px - 1, 0, 2 * Math.PI);
+  ctx.clip();
+
   for (let N = 1; N <= 365; N++) {
     const pos = solarPosition(lat, lon, N, IST);
     if (pos.alt <= 0.002) continue;
@@ -672,9 +654,8 @@ function plotAnalemma(ctx, geo, lat, lon, height, IST) {
     const L   = height / Math.tan(pos.alt);
     const saz = pos.az + Math.PI;
     const { px, py } = shadowPx(geo, L * Math.sin(saz), L * Math.cos(saz));
-    if (!inBoard(geo, px, py)) continue;
+    if (!inCircle(geo, px, py)) continue;
 
-    // Color encodes month
     const month = Math.floor((N / 365) * 12);
     const monthColors = [
       '#3498db','#2ecc71','#1abc9c','#f1c40f','#e67e22','#e74c3c',
@@ -687,6 +668,7 @@ function plotAnalemma(ctx, geo, lat, lon, height, IST) {
     ctx.fill();
   }
   ctx.globalAlpha = 1;
+  ctx.restore();
 }
 
 function drawCurrentShadowTip(ctx, geo, lat, lon, N, IST, height) {
@@ -696,10 +678,13 @@ function drawCurrentShadowTip(ctx, geo, lat, lon, N, IST, height) {
   const L   = height / Math.tan(pos.alt);
   const saz = pos.az + Math.PI;
   const { px, py } = shadowPx(geo, L * Math.sin(saz), L * Math.cos(saz));
-  if (!inBoard(geo, px, py)) return;
+  if (!inCircle(geo, px, py)) return;
 
-  // Shadow line from gnomon to tip
   ctx.save();
+  ctx.beginPath();
+  ctx.arc(geo.gx, geo.gy, geo.R_px - 1, 0, 2 * Math.PI);
+  ctx.clip();
+
   ctx.strokeStyle = 'rgba(26, 42, 74, 0.35)';
   ctx.lineWidth = 1.5;
   ctx.setLineDash([4, 4]);
@@ -709,7 +694,6 @@ function drawCurrentShadowTip(ctx, geo, lat, lon, N, IST, height) {
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // Tip dot
   ctx.fillStyle = '#f5c842';
   ctx.strokeStyle = '#e07840';
   ctx.lineWidth = 1.5;
@@ -726,15 +710,16 @@ function drawCurrentShadowTip(ctx, geo, lat, lon, N, IST, height) {
 ══════════════════════════════════════════════════════ */
 function computeObsWindow(lat, lon, N, height) {
   let start = null, end = null;
+  const R_cm = PLOT_R_CM;
   for (let t = 5 * 60; t <= 19 * 60; t++) {
     const IST = t / 60;
     const pos = solarPosition(lat, lon, N, IST);
     if (pos.alt <= 0.002) continue;
     const L   = height / Math.tan(pos.alt);
     const saz = pos.az + Math.PI;
-    const x   = GNOMON_X + L * Math.sin(saz);
-    const y   = GNOMON_Y - L * Math.cos(saz);
-    if (x >= 0 && x <= BOARD_W && y >= 0 && y <= BOARD_H) {
+    const x   = L * Math.sin(saz);
+    const y   = L * Math.cos(saz);
+    if ((x*x + y*y) <= R_cm * R_cm) {
       if (start === null) start = IST;
       end = IST;
     }
@@ -791,15 +776,6 @@ function render() {
 
   const noon = solarNoonIST(lat, lon, N);
   document.getElementById('iNoon').textContent = formatTime(noon) + ' IST';
-
-  // ── Observation window ──
-  const { start, end } = computeObsWindow(lat, lon, N, height);
-  const obsEl = document.getElementById('obsBox');
-  if (start !== null) {
-    obsEl.innerHTML = `Observation window on ${d.toDateString()}: <span>${formatTime(start)} IST</span> — <span>${formatTime(end)} IST</span> &nbsp;·&nbsp; Duration: <span>${formatTime(end - start).replace(':','h ')}m</span>`;
-  } else {
-    obsEl.innerHTML = 'Shadow never falls inside the A4 board on this date.';
-  }
 }
 
 /* ══════════════════════════════════════════════════════
